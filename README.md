@@ -1,4 +1,4 @@
-# Data_Challenge - Stanford's Stats 315 Data Challenge in R
+# Stanford's Stats 315 Data Challenge in R
 A company in Chile uses crowd-sourcing to fund loans to the public, as
 a means to offer relief from the high bank interest rates. The data in
 this challenge consists of historical loan records for a case-control sample of 3000 past customers. The variables characterize some aspects
