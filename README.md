@@ -1,7 +1,9 @@
 # Stanford's Stats 315 Data Challenge in R
 A company in Chile uses crowd-sourcing to fund loans to the public, as
 a means to offer relief from the high bank interest rates. The data in
-this challenge consists of historical loan records for a case-control sample of 3000 past customers. The variables characterize some aspects
+this challenge consists of historical loan records for a case-control sample of 3000 past customers. 
+## Variables
+The variables characterize some aspects
 of the loan, such as duration, amount, interest rate and many other
 more technical features of the loans. There are also some qualitative
 variables such as reason for the loan, a quality score and so on. One of
@@ -17,6 +19,7 @@ binary outcome ”default” (in the first column). There is also a file
 loan testx.csv which consists of a random sample of 10000 other
 customers from the general pool. For these you are provided only the
 30 features.
+## Task
 Your job is to build a risk score — probability of default — for each
 customer in the test set. You may use any of the tools discussed in
 the lectures in this class. You may not use tools not discussed in this
