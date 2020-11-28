@@ -1,0 +1,532 @@
+---
+title: "HW3 Data Challenge"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+```{r, include=F}
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(polycor)
+library(car)
+library(DMwR)
+library(stats)
+library(purrr)
+library(broom)
+library(gam)
+library(psych)
+library(e1071)
+```
+First, load the data and view with "str()":
+```{r}
+test = read.csv("./loan_testx.csv", stringsAsFactors = T)
+train = read.csv("./loan_train.csv", stringsAsFactors = T)
+str(train)
+```
+
+```{r}
+str(test)
+```
+
+\newpage
+\section{Similarity Test}
+
+The first task is to get an understanding of similarity between the test and training datasets. One way to accomplish this is to view the differences in the Empirical Cumulative Distributions. Here is a visualization using black as the test and red as the training data: 
+
+```{r warning=FALSE}
+train_n = train %>%
+  select(-default) %>%
+  keep(is.numeric)
+test_n = test %>% 
+  keep(is.numeric)
+
+train_n %>%
+  gather() %>%
+  ggplot() + 
+  facet_wrap(~ key, scales = 'free') + 
+  stat_ecdf(aes(value), geom = "step", col = 'red') + 
+  stat_ecdf(data = test_n %>% gather(), aes(value), geom = "step", col = 'black')
+```
+
+A way to quantify the difference in these samples is by using the two sample Kolmogorov- Smirnov test. This test focuses on the $D$ statistic:
+$$D_{n,m} = \displaystyle \sup_{x}|F_{1,n}(x) - F_{2,m}(x)|$$
+Where $F(x)$ is are the respective empirical distribution functions. The null hypothesis is that the samples came from the same distribution and the alternative is that the distributions are different. Here is the output of the KS test applied over each column of test and train:
+
+```{r warning=FALSE}
+result <- colnames(train_n) %>%
+  set_names() %>% 
+  map(~ ks.test(train_n[, .x], test_n[, .x])) %>%
+  map_dfr(., broom::tidy, .id = "parameter") %>%
+  arrange(p.value)
+result
+```
+
+It appears that for some of the predictors, the KS test was significant. This is a caution sign against overfitting these predictors too closely as they may not generalize to the test data very well.
+
+Similarly, we can look at a comparison of histograms for the factor variables:
+
+```{r warning=FALSE}
+train_f = train %>%
+  dplyr::select(-default) %>%
+  keep(is.factor)
+
+test_f = test %>%
+  keep(is.factor)
+
+train_f %>%
+  gather() %>%
+  ggplot(aes(value)) + 
+  facet_wrap(~ key, scales = 'free') +
+  geom_histogram(data = test_f %>% gather(), fill = 'black', stat = 'count') + 
+  geom_histogram(stat = 'count', fill = 'red', alpha = .75) + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+\newpage
+\section{VIF and Correlation}
+
+Next, we want to look at the VIF scores from a naive logisitic regression model to indicate the predictors that have the highest multicollinearity. The statistic of interest is now:
+$$VIF_i = \frac{1}{1-R_i^2}$$
+Generally, $VIF(\hat\beta_i)>10$ is considered multicollinear.
+
+```{r}
+lm.fit = lm(default ~ ., data = train)
+vifplot <- function(vif){
+  data.frame(name = rownames(vif), vif) %>%
+  arrange(-GVIF) %>%
+  mutate(name = factor(name, levels = name)) %>%
+  ggplot(aes(y=GVIF, x = name)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+This plot shows a breakdown of VIF by variable. Note that this is plotted on a log scale to compensate for the large magnitude of VIFs in the naive model.
+
+```{r}
+fit = vif(glm(default~., data = train, family = 'binomial'))
+fit[,'GVIF'] = log(fit[,'GVIF'])
+vifplot(fit)
+```
+After checking for multicollinearlity, we can isolate pairwise collinearities by computing pairwise correlations and plotting it in a correlation plot. We further used hierarchial clustering to help identify clusters of predictors in a unsupervised manner.
+
+```{r warning=FALSE}
+hetcor = hetcor(train)
+cors = hetcor$correlations
+corrplot(cors,
+         pch.cex = .9,
+         method = 'ellipse', 
+         addrect = 12, 
+         order = "hclust", 
+         tl.col = "black",
+         tl.srt = 60)
+```
+
+Based off of this information, our goal is to remove enough predictors to reduce the multicollinearity without adversely affecting the model's ability to predict the response. After iterating this process, this is the final list of predictors to remove:
+
+train_s = train %>% select(-out_prncp_inv, -recover,-prin_rec,-pymnt_rec,-amount,-ncc,-total_acc,-monthly_payment)
+```{r}
+train_s = train %>% select(-total_cc,
+                           -amount,
+                           -out_prncp,
+                           -pymnt_rec,
+                           -funded,
+                           -monthly_payment,
+                           -initial_list_status
+                           )
+```
+
+We can further use an F test to compare the naive model versus the model with the multicollinear variables removed:
+
+```{r warning=FALSE}
+fit2 = glm(default~. + quality * interest - quality - interest, data = train_s, family = 'binomial')
+anova(fit2, fit)
+```
+
+Check the VIF of the reduced model with a similar plot to the first (But now not log transformed):
+
+```{r}
+vifplot(vif(fit2))
+```
+
+View the updated pairwise correlations. Note that size of each cluster has been reduced indicating that some of the multicollinearity has been removed from the model.
+
+```{r warning=FALSE}
+hetcor = hetcor(train_s)
+cors = hetcor$correlations
+corrplot(cors,
+         pch.cex = .9,
+         method = 'ellipse', 
+         addrect = 12, 
+         order = "hclust", 
+         tl.col = "black",
+         tl.srt = 60)
+```
+
+For a closer look at pairwise comparisions, we show selected variables plotted against each other.
+
+```{r}
+ggplot(train_s, aes(y = recover, x = coll_fee)) + geom_point()
+```
+
+```{r}
+ggplot(train_s, aes(y = interest, x = quality)) + geom_point()
+```
+
+```{r}
+ggplot(train_s, aes(y = last_payment, x = prin_rec)) + geom_point()
+```
+```{r}
+ggplot(train_s, aes(y = total_acc, x = ncc)) + geom_point()
+```
+
+\newpage
+\section{Imputing}
+
+After reducing multicollinearity, we now check for any missing data.
+
+```{r}
+apply(train_s, 2, function(x) sum(is.na(x)))
+```
+
+Employment seems to be an issue, specifically it is missing 160 entries out of 3000 training points. We can impute the missing values using a KNN implementation. Now an updated histogram shows 0 NA's for employment data.
+
+```{r}
+apply(test, 2, function(x) sum(is.na(x)))
+```
+
+
+```{r}
+train_si = knnImputation(train_s)
+apply(train_si, 2, function(x) sum(is.na(x)))
+train_si %>% group_by(employment) %>% summarize(count = n()) %>% select(employment, count) %>% 
+  ggplot(aes(y = count, x = employment)) + geom_bar(stat = 'identity')
+```
+
+We have to impute the employment column in test using the same method we used for the training data. We check to see that the distributions of employment in test is similar to employment in train.
+```{r}
+test_i = test
+test_i$reason[test_i$reason == 'educ'] <- NA
+test_i = knnImputation(test_i)
+test_i %>% group_by(employment) %>% summarize(count = n()) %>% select(employment, count) %>% 
+  ggplot(aes(y = count, x = employment)) + 
+  geom_bar(stat = 'identity') + 
+  geom_bar(data = train_si %>% group_by(employment) %>% summarize(count = n()) %>% select(employment, count),
+           stat = 'identity', fill = 'darkred') 
+```
+\newpage
+\section{Conditional Plots}
+
+Since our ultimate goal is to estimate the Bayes Classifier, that is:
+$$\hat G(x) = \max_{g \in \mathbb{G}}Pr(g|X=x)$$
+It would be useful to view a conditional plot of default against all the predictor variables:
+
+```{r warning=FALSE}
+train %>%
+  keep(is.numeric) %>%
+  mutate(default = as.factor(default)) %>%
+  gather(-default, key = 'key', value = 'value') %>%
+  ggplot(aes(value, fill = default)) + 
+  facet_wrap(~ key, scales = 'free') + 
+  geom_density(position = 'fill',alpha = .5)
+```
+
+Similarly for factor predictors, we can view stacked histograms showing the percentage of default vs not default conditioned on different class values:
+
+```{r warning=FALSE}
+train %>%
+  mutate(default = as.factor(default)) %>%
+  keep(is.factor) %>%
+  gather(-default, key = 'key', value = 'value') %>%
+  ggplot(aes(fill = default, y= 1, x=value)) + 
+  geom_bar(position = "fill",stat="identity") +
+  facet_wrap(~ key, scales = 'free') + 
+  theme(axis.text.x = element_text( angle = 60,  hjust = 1 ) )
+```
+
+\newpage
+\section{Modeling}
+
+Now we want to begin modeling the response. We fit a series of models that vary in methodology and flexibility. We begin with a base model using linear logistic regression, explore flexible nonparametric methods using a vareity of kernel methods, and then extend the flexibility of the linear logisitic model by modeling with a generalized additive linear logisitic model.
+
+
+First, we build a baseline model. This model will be logistic regression (from the family of generalized linear models) of default against all the predictors. The model is:
+$$Pr(G = k|X = x) = \frac{e^{(\beta_{k0} + \beta_k^Tx)}}{1 + \sum_{K-1}(\beta_{l0} + \beta_l^Tx)}, k = 1,...,K-1$$
+Where in our case $K = 2$ and this simplifies to a single linear model that is fit using Maximum Likelihood Estimation. Additionally, we split the training data into a train and dev set to enable the use of cross validation.
+
+```{r}
+set.seed(123)
+index = sample(nrow(train_si), .7*nrow(train_si))
+dev = train_si[-index,]
+train_sit = train_si[index,]
+```
+
+```{r warning=FALSE}
+base = glm(default~., data = train_sit, family = 'binomial')
+preds = predict(base, newdata = dev, type = 'response')
+class = rep(0, length(preds))
+class[preds>.5] = 1
+mean(dev$default == class)
+```
+
+```{r}
+summary(base)
+```
+
+Based upon our EDA, we would like to consider adding the interaction term (quality * interest) and (last_payment * prin_rec). We can see that this improves the test performance marginally.
+
+```{r warning=FALSE}
+interaction = glm(default~.+ quality * interest + last_payment * prin_rec, 
+           data = train_sit, family = 'binomial')
+preds = predict(interaction, newdata = dev, type = 'response')
+class = rep(0, length(preds))
+class[preds>.5] = 1
+mean(dev$default == class)
+```
+
+For our next model we would like to consider a KNN classificer which makes estimations using:
+$$\hat{Y_k} = \frac{1}{k}\sum_{x_i \in N_k(x)}y_i$$
+For this model, we need to make "dummy" variables for the factors.
+
+```{r}
+train_knn = train_sit
+test_knn = dev
+
+train_knn$term = dummy.code(train_knn$term)
+train_knn$employment = dummy.code(train_knn$employment)
+train_knn$status = dummy.code(train_knn$status)
+train_knn$reason = dummy.code(train_knn$reason)
+train_knn$quality = dummy.code(train_knn$quality)
+
+test_knn$term = dummy.code(test_knn$term)
+test_knn$employment = dummy.code(test_knn$employment)
+test_knn$status = dummy.code(test_knn$status)
+test_knn$reason = dummy.code(test_knn$reason)
+test_knn$quality = dummy.code(test_knn$quality)
+```
+
+Next we fit a series of models indexed by $k$ and select the best performing parameter by cross validation/ 1 Standard Error Rule:
+
+```{r}
+set.seed(1)
+library(class)
+knn_error = c()
+for(k in 1:60){
+  knn.pred = knn(train_knn[,-1], test_knn[,-1], as.factor(train_sit[,1]), k = k)
+  knn_error[k] = mean(knn.pred!=dev[,1])
+}
+plot(knn_error)
+```
+
+Finally, the optimal knn model.
+
+```{r}
+knn.pred = knn(train_knn[,-1], test_knn[,-1], as.factor(train_sit[,1]), k = 9)
+mean(knn.pred==dev[,1])
+```
+
+Now, we use a variant of KNN by generalizing the distance kernel from euclidean distance to the epanechinikov kernel. This allows a weighting of neighbors according to their distances following the formula:
+
+$$K(u) = \frac{3}{4}(1-u^2), |u|\leq1$$
+
+```{r}
+set.seed(1)
+library(kknn)
+kknn_error = c()
+for(k in 1:100){
+  kknn = kknn(as.factor(default) ~ ., train_knn, test_knn, kernel = 'epanechnikov', k = k)
+  kknn.pred = kknn$fitted.values
+  kknn_error[k] = mean(kknn.pred!=dev[,1])
+}
+plot(kknn_error)
+```
+
+```{r}
+which.min(kknn_error)
+```
+
+As seen below, the epanechinikov kernel performs worse than the standard euclidean on the cross validated dataset.
+
+```{r}
+kknn = kknn(as.factor(default) ~ ., train_sit, dev, kernel = 'epanechnikov', k = 46)
+kknn.pred = kknn$fitted.values
+mean(kknn.pred==dev[,1])
+```
+
+We now move onto the naive Bayes model which makes the assumption that given a class $G = j$, the features $X_k$ are independent:
+$$f_j(x) = \prod_{k = 1}^{p}f_{jk}(X_k)$$
+
+```{r}
+nb <- naiveBayes(default ~ ., data = train_sit)
+preds = apply(predict(nb, dev, type = "raw"), 1, which.max)-1
+mean(preds==dev[,1])
+```
+
+The performance is not great so we decide to use SVM, a more flexible method. SVM solves the problem:
+$$\displaystyle \max L_D = \max \sum_N \alpha_i - \frac{1}{2}\sum_{i = 1}^N\sum_{i'=1}^N\alpha_i\alpha_{i'}y_iy_{i'}x_i^Tx_i'$$
+Where we generalize the inner product of $x_i$ and $x_i'$ with transformed feature vectors $K(x,x') = <h(x), h(x')>$ in the form of a polynomial, radial, and sigmoid function.
+```{r warning=FALSE}
+set.seed(1)
+svm.linear <- svm(default ~ ., data = train_sit, kernel = "linear", cross = 10)
+svm.linear$tot.MSE
+svm.poly <- svm(default ~ ., data = train_sit, kernel = "polynomial", cross = 10)
+svm.poly$tot.MSE
+svm.rad <- svm(default ~ ., data = train_sit, kernel = "radial", cross = 10)
+svm.rad$tot.MSE
+svm.sig <- svm(default ~ ., data = train_sit, kernel = "sigmoid", cross = 10)
+svm.sig$tot.MSE
+
+
+svm.rad.preds <- as.numeric(predict(svm.rad, newdata = dev))
+svm.rad.class = rep(0, length(svm.rad.preds))
+svm.rad.class[svm.rad.preds>.5] = 1
+mean(dev$default == svm.rad.class)
+```
+
+The performance is as good as our base model using linear logisitic regression. Due to our base model's interpretibility and ability to conduct inference, we omit these models. Next we would like to extend the flexibility of our base model by considering a Nonparametric Logistic Regression in the form of a Generalized Additive Model. This has the form:
+$$g(\mu) = \alpha + f_1(X_1) + f_2(X_2) + ... + f_p(X_p)$$
+Where $g(\mu) = \frac{\mu(X)}{1-\mu(X)}$ is the logit link function. More specifically, since some of our predictors are factors variables, this will be a semiparametric model of the form:
+$$g(\mu) = X^T\beta + \alpha_k + f(Z)$$
+```{r}
+# Select all predictors that are numeric with more than 2 distinct values
+ind = apply(train_sit %>% keep(is.numeric), 2, function(x) length(unique(x)))
+ind = ind > 2
+s_predictors = names(apply(train_sit %>% keep(is.numeric), 2, function(x) length(unique(x))))[ind]
+# reason is omitted because of incapability with test set
+s_predictors = s_predictors[s_predictors != "reason"]
+mid = paste(s_predictors, collapse = ") + s(")
+form = as.formula(paste('default ~ . + s(', mid, ')'))
+form
+```
+
+
+```{r warning=FALSE}
+gam = gam(form, family = binomial, data = train_sit)
+```
+
+```{r}
+summary(gam)
+```
+
+
+```{r warning=FALSE}
+preds = predict(gam, newdata = dev)
+class = rep(0, length(preds))
+class[preds>.5] = 1
+mean(dev$default == class)
+```
+
+\newpage
+\section{Final Model}
+
+The performance with this more flexible model appears to have improved the test MSE by a moderate margin. 
+Now we would like to consider a larger set of predictors and use a greedy algorithm (forward stepwise) to choose the best subset based upon the $AIC$ criterion. Additionally, we are going to allow the model to consider higher dgf for each predictor allowing for a much more flexible fit:
+
+```{r}
+set.seed(123)
+# Reimpute since we are using all the variables now
+train_i = knnImputation(train)
+index = sample(nrow(train_i), .7*nrow(train_i))
+dev = train_i[-index,]
+train_it = train_i[index,]
+```
+
+More specifically, we would like to set these predictors to the appropriate DGF. We would like to pick predictors that are similar between the test and training sets (using the previous KS test) and also look back at the conditional plots to see which predictors warrant higher DGF.
+
+```{r warning = FALSE}
+gam.fit = gam(default ~ . + interest*quality + last_payment*prin_rec, family = "binomial", data = train_it)
+  
+stepGAM = step.Gam(gam.fit, scope = list(
+  # For factor variables and variables that have less than two distinct values, include options of not retaining the variable
+  # or removing a dummy variable into the model.
+  "reason" = ~1 + reason,
+  "n_collect" = ~1 + n_collect,
+  "initial_list_status" = ~1 + initial_list_status,
+  "recover" = ~1 + recover,
+  "coll_fee" = ~1 + coll_fee,
+  "term" = ~1 + term,
+  "total_acc" = ~1 + total_acc,
+  "amount" = ~1 + amount,
+  "monthly_payment" = ~1 + monthly_payment,
+  "status" = ~1 + status,
+  "pymnt_rec" = ~1 + pymnt_rec,
+  "quality" = ~1 + quality,
+  "violations" = ~1 + violations,
+  "del" = ~1 + del,
+  "employment" = ~1 + employment,
+  # These are the variables that were signnificantly different b/n test and train. Cap their DGFs to 4
+  "interest" = ~1 + interest + s(interest),
+  "out_prncp_inv" = ~1 + out_prncp_inv + s(out_prncp_inv),
+  "req" = ~1 + req + s(req),
+  "prin_rec" = ~1 + prin_rec + s(prin_rec),
+  "total_cc" = ~1 + total_cc + s(total_cc),
+  "out_prncp" = ~1 + out_prncp + s(out_prncp),
+  "last_payment" = ~1 + last_payment + s(last_payment),
+  "inc" = ~1 + inc + s(inc),
+  # For all other variables, consider nonlinear terms of varying degrees of freedom
+  "funded" = ~1 + funded + s(funded) + s(funded,10) + s(funded, 20),
+  "v1" = ~1 + v1 + s(v1) + s(v1, 10) +  s(v1, 20),
+  "int_rec" = ~1 + int_rec + s(int_rec) + s(int_rec, 10) + s(int_rec, 20) ,
+  "credit_bal" = ~1 + credit_bal + s(credit_bal)  + s(credit_bal, 10) + s(credit_bal, 20),
+  "ncc" = ~1 + ncc + s(ncc)  + s(ncc, 10)  + s(ncc, 20),
+  "fees_rec" = ~1 + fees_rec + s(fees_rec) + s(fees_rec, 10) + s(fees_rec, 20),
+  "credit_ratio" = ~1 + credit_ratio + s(credit_ratio, 10) + s(credit_ratio, 20)),
+  direction = "forward", 
+  trace = FALSE)
+
+stepGAM$formula
+```
+
+```{r}
+summary(stepGAM)
+```
+
+It appears a variety of predictors are important in predicting the response, such as reason, initial_list_status, monthly_payment, pymnt_rec, employment, v1, the interaction of prin_rec:last_payment and a nonlinear term of int_rec. Now we want to compute the dev MSE:
+
+```{r}
+pred = predict(stepGAM, newdata = dev, type = "response")
+class = rep(0, length(pred))
+class[pred>.5] = 1
+mean(dev$default == class)
+```
+
+The performance of this model appears to be the best. We are concerned with the model overfitting to the data so we look at the RSS:
+
+```{r}
+class = rep(0, length(stepGAM$fitted.values))
+class[stepGAM$fitted.values>.5] = 1
+mean(train_it$default == class)
+```
+
+\newpage
+\section{Prediction on Test Set}
+
+Finally we predict on the test set. We would also like to check to see if the default rate in the test set is roughly 7%:
+
+```{r warning = FALSE}
+test_preds = predict(stepGAM, newdata = test_i, type = "response")
+class = rep(0, length(test_preds))
+class[test_preds>.5] = 1
+sum(class)/length(class)
+```
+
+Now view a breakdown of fitted values to the training data compared to predicted values on the test data:
+
+```{r warning=FALSE}
+test_preds = data.frame(x = test_preds); train_preds = data.frame(x = stepGAM$fitted.values)
+ggplot() +
+  geom_histogram(data = test_preds, aes(x), stat="bin", bins = 30, col = 'blue', fill = "blue", alpha = .50)+
+  geom_histogram(data = train_preds, aes(x), stat="bin", bins = 30, col = 'red', fill = "red", alpha = .35)
+
+```
+
+From this output we can see that the proportion of fitted values indicating default/not default is much higher than the ratio of default/not default in the test set. This behavior is expected because the train was a case control sample which forced alot more defaults into the training set.
+
+```{r}
+names(test_preds) = "Predictions"
+write.csv(test_preds, "./loan_testy.csv", row.names = FALSE, col.names = FALSE)
+```
+
